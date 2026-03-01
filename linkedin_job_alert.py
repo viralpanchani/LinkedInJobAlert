@@ -241,15 +241,22 @@ def fetch_all_qualifying_jobs(seen: set) -> list[dict]:
         for location in CONFIG["ABROAD_LOCATIONS"]:
             search_tasks.append((keyword, location, False))
 
-    # Execute all searches in parallel with ThreadPoolExecutor
-    log.info(f"Executing {len(search_tasks)} searches in parallel...")
-    with ThreadPoolExecutor(max_workers=10) as executor:
-        future_to_task = {
-            executor.submit(fetch_jobs_for_keyword_location, kw, loc, remote): (kw, loc)
-            for kw, loc, remote in search_tasks
-        }
+    # Execute all searches with controlled rate limiting to avoid HTTP 429
+    log.info(f"Executing {len(search_tasks)} searches with rate limiting...")
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = []
+        future_to_task = {}
         
-        for future in as_completed(future_to_task):
+        # Submit tasks with staggered delays to avoid overwhelming LinkedIn
+        for i, (kw, loc, remote) in enumerate(search_tasks):
+            future = executor.submit(fetch_jobs_for_keyword_location, kw, loc, remote)
+            futures.append(future)
+            future_to_task[future] = (kw, loc)
+            # Stagger submissions: 0.4s delay between each task submission
+            if i < len(search_tasks) - 1:
+                time.sleep(0.4)
+        
+        for future in as_completed(futures):
             kw, loc = future_to_task[future]
             try:
                 jobs = future.result()
@@ -264,14 +271,24 @@ def fetch_all_qualifying_jobs(seen: set) -> list[dict]:
     new_jobs = [j for j in raw.values() if j["id"] not in seen]
     log.info(f"New (unseen) jobs    : {len(new_jobs)}")
 
-    # Filter restricted postings in parallel (fetches each detail page)
+    # Filter restricted postings with controlled rate limiting
     qualifying = []
-    log.info("Checking job restrictions in parallel...")
+    log.info("Checking job restrictions with rate limiting...")
     
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        future_to_job = {executor.submit(is_open_to_all, job): job for job in new_jobs}
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = []
+        future_to_job = {}
         
-        for future in as_completed(future_to_job):
+        # Submit detail check tasks with staggered delays
+        for i, job in enumerate(new_jobs):
+            future = executor.submit(is_open_to_all, job)
+            futures.append(future)
+            future_to_job[future] = job
+            # Stagger submissions: 0.3s delay between each task
+            if i < len(new_jobs) - 1:
+                time.sleep(0.3)
+        
+        for future in as_completed(futures):
             job = future_to_job[future]
             try:
                 if future.result():
