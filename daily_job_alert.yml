@@ -1,0 +1,49 @@
+name: LinkedIn Job Alert — Daily Run
+
+on:
+  schedule:
+    # Runs every day at 08:00 AM IST (02:30 UTC)
+    - cron: "30 2 * * *"
+
+  # Allow manual trigger from GitHub Actions UI
+  workflow_dispatch:
+
+jobs:
+  run-job-alert:
+    name: Fetch & Notify
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write   # needed to commit seen_jobs.json back
+
+    steps:
+      # ── 1. Checkout repo ──────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Set up Python ──────────────────────────────────────────────────
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # ── 3. Install dependencies ───────────────────────────────────────────
+      - name: Install dependencies
+        run: pip install requests
+
+      # ── 4. Run the agent ──────────────────────────────────────────────────
+      - name: Run LinkedIn Job Alert Agent
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python linkedin_job_alert.py
+
+      # ── 5. Commit updated seen_jobs.json so next run stays in sync ────────
+      - name: Commit seen_jobs.json
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add seen_jobs.json
+          # Only commit if there's actually a change
+          git diff --cached --quiet || git commit -m "chore: update seen_jobs.json [skip ci]"
+          git push
