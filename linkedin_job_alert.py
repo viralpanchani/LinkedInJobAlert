@@ -14,6 +14,7 @@ import time
 import logging
 import requests
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  CONFIGURATION  — values are overridden by environment variables in CI
@@ -23,15 +24,18 @@ CONFIG = {
     "TELEGRAM_BOT_TOKEN": os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN_HERE"),
     "TELEGRAM_CHAT_ID":   os.getenv("TELEGRAM_CHAT_ID",   "YOUR_CHAT_ID_HERE"),
 
-    # Job roles to monitor
+    # Job roles to monitor (targeting senior/L2 positions for 6.5 years experience)
     "JOB_KEYWORDS": [
+        "Senior SDET",
         "SDET",
-        "Automation Engineer",
-        "QA Automation",
-        "Test Automation Engineer",
-        "Software Development Engineer in Test",
-        "Test Engineer",
+        "Senior Automation Engineer",
+        "Senior QA Automation",
+        "Senior Test Automation Engineer",
+        "Lead SDET",
     ],
+
+    # Experience level (3=Mid-Senior level, 4=Director, for 6.5 years experience)
+    "EXPERIENCE_LEVEL": "3",  # LinkedIn f_E=3 for Mid-Senior level
 
     # Abroad locations to search (these fetch jobs posted for worldwide audiences)
     "ABROAD_LOCATIONS": [
@@ -131,6 +135,7 @@ def fetch_jobs_for_keyword_location(keyword: str, location: str, remote_only: bo
         "start":    0,
         "sortBy":   "DD",        # newest first
         "f_TPR":    "r86400",    # last 24 h — keeps results fresh
+        "f_E":      CONFIG["EXPERIENCE_LEVEL"],  # Mid-Senior level
     }
     if remote_only:
         params["f_WT"] = REMOTE_CODE
@@ -215,27 +220,43 @@ def is_open_to_all(job: dict) -> bool:
 # ─────────────────────────────────────────────────────────────────────────────
 def fetch_all_qualifying_jobs(seen: set) -> list[dict]:
     """
-    Two passes:
+    Two passes (parallelized for speed):
       1. Remote jobs (LinkedIn f_WT=2, no location bias)
       2. Abroad locations with worldwide audience
     Then deduplicate, filter already-seen, and check for restrictions.
     """
     raw: dict[str, dict] = {}   # job_id → job dict (dedup)
 
+    # Build all search tasks
+    search_tasks = []
+    
     # Pass 1 — Pure remote (no location)
     log.info("━━━ Pass 1: Remote jobs (LinkedIn f_WT=2) ━━━")
     for keyword in CONFIG["JOB_KEYWORDS"]:
-        for job in fetch_jobs_for_keyword_location(keyword, "", remote_only=True):
-            raw.setdefault(job["id"], job)
-        time.sleep(1.5)
+        search_tasks.append((keyword, "", True))
 
     # Pass 2 — Abroad locations (not restricted to local)
     log.info("━━━ Pass 2: Abroad / worldwide locations ━━━")
     for keyword in CONFIG["JOB_KEYWORDS"]:
         for location in CONFIG["ABROAD_LOCATIONS"]:
-            for job in fetch_jobs_for_keyword_location(keyword, location, remote_only=False):
-                raw.setdefault(job["id"], job)
-            time.sleep(1.2)
+            search_tasks.append((keyword, location, False))
+
+    # Execute all searches in parallel with ThreadPoolExecutor
+    log.info(f"Executing {len(search_tasks)} searches in parallel...")
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        future_to_task = {
+            executor.submit(fetch_jobs_for_keyword_location, kw, loc, remote): (kw, loc)
+            for kw, loc, remote in search_tasks
+        }
+        
+        for future in as_completed(future_to_task):
+            kw, loc = future_to_task[future]
+            try:
+                jobs = future.result()
+                for job in jobs:
+                    raw.setdefault(job["id"], job)
+            except Exception as e:
+                log.error(f"Search failed for '{kw}' / '{loc}': {e}")
 
     log.info(f"\nTotal unique raw jobs: {len(raw)}")
 
@@ -243,13 +264,21 @@ def fetch_all_qualifying_jobs(seen: set) -> list[dict]:
     new_jobs = [j for j in raw.values() if j["id"] not in seen]
     log.info(f"New (unseen) jobs    : {len(new_jobs)}")
 
-    # Filter restricted postings (fetches each detail page — throttled)
+    # Filter restricted postings in parallel (fetches each detail page)
     qualifying = []
-    for job in new_jobs:
-        if is_open_to_all(job):
-            qualifying.append(job)
-            log.info(f"    ✓ Qualifying: {job['title']} @ {job['company']} ({job['location']})")
-        time.sleep(1)   # polite delay between detail fetches
+    log.info("Checking job restrictions in parallel...")
+    
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        future_to_job = {executor.submit(is_open_to_all, job): job for job in new_jobs}
+        
+        for future in as_completed(future_to_job):
+            job = future_to_job[future]
+            try:
+                if future.result():
+                    qualifying.append(job)
+                    log.info(f"    ✓ Qualifying: {job['title']} @ {job['company']} ({job['location']})")
+            except Exception as e:
+                log.error(f"Failed to check job {job['id']}: {e}")
 
     log.info(f"Qualifying jobs      : {len(qualifying)}")
     return qualifying
