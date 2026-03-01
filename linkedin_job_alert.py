@@ -326,6 +326,7 @@ def send_telegram(message: str) -> bool:
 
 def format_job_message(jobs: list[dict]) -> str:
     tag = lambda j: "🌐 Remote" if j.get("remote") else f"✈️ Abroad"
+    
     header = (
         f"🚀 <b>LinkedIn Job Alert</b>\n"
         f"📅 {datetime.utcnow().strftime('%d %b %Y, %H:%M UTC')}\n"
@@ -339,6 +340,7 @@ def format_job_message(jobs: list[dict]) -> str:
             f"🏢 {j['company']}\n"
             f"📍 {j['location']}\n"
             f"🏷 {tag(j)} · {j['keyword']}\n"
+            f"🕒 Posted: Within 24 hours\n"
             f"🔗 <a href='{j['url']}'>View Job</a>\n\n"
         )
     return header + body
